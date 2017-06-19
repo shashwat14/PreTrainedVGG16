@@ -1,6 +1,6 @@
 """
 The weights have been used from the files made available by Davi Frossard
-The code is changed heavily to make it more modular, cleaner and allow visualization
+The code is changed almost entirely to make it more modular, cleaner and to allow fine-tuning and visualization in TensorBoard.
 The weights are obtained from the following web page : https://www.cs.toronto.edu/~frossard/post/vgg16/
 """
 
@@ -10,16 +10,26 @@ import numpy as np
 
 class VGG16():
 
-	def __init__(self, sess, inputs, only_convolution=False):
+	def __init__(self, sess, inputs, only_convolution=False, num_out=1000):
+		'''
+		Creates an instance of VGG 16
+		Param : tf.Session(), input placeholder, only_convolution
+		'''
 		self.only_convolution = only_convolution
 		self.paramters = []
 		self.inputs = inputs
+		self.labels = tf.placeholder(tf.float32, shape=[None, num_out])
+		self.num_out = num_out
 		self.sess = sess
 		self.preprocess()
 		self.convolution_layers()
 		if not self.only_convolution:
-			self.fully_connected_layer()
+			self.fully_connected_layer(num_out)	
 			self.belief()
+			self.loss()
+
+		#Input visualization
+		tf.summary.image('Image', inputs, 3)
 
 	def preprocess(self):
 		with tf.name_scope('preprocess') as scope:
@@ -75,17 +85,19 @@ class VGG16():
 
 		self.convolution_codes = tf.reshape(pool_5, [-1, 7*7*512])
 
-	def fully_connected_layer(self):
+	def fully_connected_layer(self, num_out):
 		'''
 		Build fully connected module
 		Param: None
 		Return: Logits
 		'''
-		W, b, fc1 = fully_connected(self.convolution_codes, 7*7*512, 4096)
+		W, b, fc1 = fully_connected(self.convolution_codes, 7*7*512, 4096, name='fc1')
 		self.paramters += [W,b]
-		W, b, fc2 = fully_connected(fc1, 4096, 4096)
+		W, b, fc2 = fully_connected(fc1, 4096, 4096, name='fc2')
 		self.paramters += [W,b]
-		W, b, fc3 = fully_connected(fc2, 4096, 1000)
+
+		#customizable output
+		W, b, fc3 = fully_connected(fc2, 4096, num_out, name='fc3')
 		self.paramters += [W,b]
 		self.logits = fc3
 
@@ -94,7 +106,35 @@ class VGG16():
 		Param: None
 		Return: Probability scores
 		'''
-		self.probs = tf.nn.softmax(self.logits)
+		with tf.name_scope('probability_scores') as scope:
+			self.probs = tf.nn.softmax(self.logits)
+
+	def loss(self):
+
+		with tf.name_scope('xent') as scope:
+			self.xent = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits=self.logits, labels=self.labels), name='xent')
+			tf.summary.scalar('xent', self.xent)
+
+		with tf.name_scope('train') as scope:
+			self.optimizer = tf.train.GradientDescentOptimizer(0.0001).minimize(self.xent)
+			
+
+	def get_loss(self, X, y):
+		return self.sess.run(self.xent, feed_dict={self.inputs:X, self.labels:y})
+
+	def predict(self, X):
+		return self.sess.run(self.probs, feed_dict={self.inputs:X})
+
+	def train(self, X, y, i):
+		xent, probs,_,s = self.sess.run([self.xent, self.probs, self.optimizer, self.summary], feed_dict={self.inputs:X, self.labels:y})
+		self.writer.add_summary(s,i)
+		return xent, probs
+
+	def compile(self, path='/'):
+		tf.global_variables_initializer().run()
+		self.summary = tf.summary.merge_all()
+		self.writer = tf.summary.FileWriter(path)
+		self.writer.add_graph(self.sess.graph)
 
 	def load_weights(self, path):
 		
@@ -106,6 +146,9 @@ class VGG16():
 			if i > 25 and self.only_convolution:
 				continue
 
+			#only skip the last fully connected layer when the number of output is not same as 1000. Used for fine-tuning. 
+			if i > 29 and self.num_out != 1000:
+				continue
 			#Load weights to layers
 			print i, k, np.shape(weights[k])
 			self.sess.run(self.paramters[i].assign(weights[k]))
